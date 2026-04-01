@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.UUID;
 
 import com.company.competitions.entity.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.jmix.core.DataManager;
 import io.jmix.core.FileRef;
 import io.jmix.core.FileStorage;
@@ -23,6 +24,8 @@ import org.springframework.web.multipart.MultipartFile;
 public class ApiServer {
 
 
+    private final UserEventListener userEventListener;
+    private final UserMenuItemLoader userMenuItemLoader;
 
     @GetMapping("/sample")
     public String sample() {
@@ -30,12 +33,14 @@ public class ApiServer {
     }
     private final CurrentAuthentication currentAuthentication;
 
-    public ApiServer(CurrentAuthentication currentAuthentication, DataManager dataManager, FileStorage fileStorage) {
+    public ApiServer(CurrentAuthentication currentAuthentication, DataManager dataManager, FileStorage fileStorage, UserEventListener userEventListener, UserMenuItemLoader userMenuItemLoader) {
         this.currentAuthentication = currentAuthentication;
         this.dataManager = dataManager;
         this.fileStorage = fileStorage;
 
 
+        this.userEventListener = userEventListener;
+        this.userMenuItemLoader = userMenuItemLoader;
     }
 
     private final DataManager dataManager;
@@ -77,7 +82,7 @@ public class ApiServer {
     }
 
 
-    public class DocumentInput {
+    public static class DocumentInput {
         private UUID documentVersionUuid;
         private UUID documentId;
         private UUID soglasovanieId;
@@ -113,8 +118,6 @@ public class ApiServer {
         private UUID documentId;
 
 
-
-
         public UUID getDocumentId() {
             return documentId;
         }
@@ -126,21 +129,22 @@ public class ApiServer {
 
     }
 
+
     //это на создание версий уже существующего выбранного документа
     //мы корректируем версию документа и после сохранения создается новая версия
     @PostMapping("/uploadDocVersion")
-    public Document uploadDocVersion(@RequestBody DocumentInput input, @RequestPart("file") MultipartFile file) throws IOException  {
+    public Document uploadDocVersion(@RequestParam UUID documentId, @RequestPart("file") MultipartFile file) throws IOException  {
 
-        UUID docVersionUuid = input.getDocumentVersionUuid();
-        DocumentVersion oldVersion = dataManager.load(DocumentVersion.class).id(docVersionUuid).one();
-        Document document = oldVersion.getDocument();
+        UUID documentUuid = documentId;
+        //DocumentVersion oldVersion = dataManager.load(DocumentVersion.class).id(docVersionUuid).one();
+        Document document = dataManager.load(Document.class).id(documentUuid).one();
 
         String filename = file.getOriginalFilename();
         FileRef fileRef = fileStorage.saveStream(filename, file.getInputStream());
         System.out.println(" not easy 3");
 
         List<DocumentVersion> userDocuments = dataManager.load(DocumentVersion.class)
-                .query("select e from DocumentVersion e where e.document =:docId order by e.createDate")
+                .query("select e from DocumentVersion e where e.document =:docId order by e.createdDate")
                 .parameter("docId", document)
                .list();
 // .parameter("user", ((User) currentAuthentication.getUser()))
@@ -203,8 +207,70 @@ public class ApiServer {
     public UserSogl createUserSoglasovant(@RequestBody DocumentInput input) {
         UserSogl userSogl = dataManager.create(UserSogl.class);
         userSogl.setSoglasovanie(dataManager.load(Soglasovanie.class).id(input.getSoglasovanieId()).one());
+        userSogl.setStatus("На рассмотрении");
         dataManager.save(userSogl);
         return userSogl;
+    }
+
+    //когда пользователь-согласовант нажимает согласовать
+    @PostMapping("/toAgree")
+    public UserSogl toAgree(@RequestParam UUID userSoglasovantId,@RequestParam UUID soglId) {
+        UserSogl userSogl = dataManager.load(UserSogl.class).id(userSoglasovantId).one();
+        Soglasovanie sogl = dataManager.load(Soglasovanie.class).id(soglId).one();
+        userSogl.setStatus("Согласовано");
+        String history = sogl.getHistory();
+        history += userSogl.getUser().getLastName() + " " + userSogl.getUser().getLastName() + "согласовал";
+        sogl.setHistory(history);
+        //здесь надо пересчитать
+        dataManager.save(userSogl);
+        dataManager.save(sogl);
+        return userSogl;
+    }
+    //когда пользователь согласовант хочет внести комментарий и это вносится в историю согласования
+    @PostMapping("/setComment")
+    public UserSogl setComment(@RequestParam UUID userSoglasovantId, @RequestParam UUID soglId, @RequestParam String comment) {
+        UserSogl userSogl = dataManager.load(UserSogl.class).id(userSoglasovantId).one();
+        Soglasovanie sogl = dataManager.load(Soglasovanie.class).id(soglId).one();
+        userSogl.setComment(comment);
+        String history = sogl.getHistory();
+        history += "Комментарий внесен " + userSogl.getComment() + "пользователем" + userSogl.getUser().getLastName();
+        sogl.setHistory(history);
+        //здесь надо пересчитать
+        dataManager.save(userSogl);
+        dataManager.save(sogl);
+        return userSogl;
+    }
+    //перед выходом из согласования пересчитывать решения согласовантов
+    @PostMapping("/setStatus")
+    public Soglasovanie setStatus(@RequestParam UUID soglId) {
+        Soglasovanie s = dataManager.load(Soglasovanie.class).id(soglId).one();
+        List<UserSogl> userSoglList = dataManager.load(UserSogl.class).query("select e from UserSogl e where" +
+                        " e.soglasovanie =:sogl").
+                parameter("sogl", s).list();
+
+        Long count = userSoglList.stream().filter(r -> r.getStatus().equals("Согласован") && !r.getStatus().equals("На рассмотрении"))
+                .count();
+        if (count == userSoglList.stream().count()) {
+            s.getDocVersion().getDocument().setStatus("Согласовано");
+            dataManager.save(s.getDocVersion().getDocument());
+        }
+        else {
+            s.getDocVersion().getDocument().setStatus("Отклонено");
+            dataManager.save(s.getDocVersion().getDocument());
+        }
+
+        return s;
+    }
+    //отфильтровать пользователей согласовантов по вошедшему пользователю
+    @GetMapping("/getSogl")
+    public List<Soglasovanie> getSogl() {
+
+        List<UserSogl> userSoglList = dataManager.load(UserSogl.class).query("select e from UserSogl e where" +
+                        " e.user =: user and " +
+                "e.status = 'На рассмотрении").
+                parameter("user", ((User) currentAuthentication.getUser())).list();
+
+        return userSoglList.stream().map(e -> e.getSoglasovanie()).toList();
     }
     //прикрепить документ к согласованию, точнее его последнюю версию
     @PostMapping("/attachLastDoc")
