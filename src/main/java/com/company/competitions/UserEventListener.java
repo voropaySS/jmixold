@@ -32,7 +32,7 @@ public class UserEventListener {
 
     private final PasswordEncoder passwordEncoder;
 
-    @EventListener
+   @EventListener
     public void onUserChangedBeforeCommit(final EntityChangedEvent<User> event) {
         if (event.getType().equals(EntityChangedEvent.Type.CREATED)) {
             User newUser = dataManager.load(event.getEntityId()).one();
@@ -40,14 +40,13 @@ public class UserEventListener {
             String encodedPassword = passwordEncoder.encode(rawPassword);
             newUser.setPassword("{noop}P@ssw0rd");
             List<GrantedAuthority> authorities = Arrays.asList(
-                    new SimpleGrantedAuthority("Full Access")
+                    new SimpleGrantedAuthority("ROLE_system-full-access")
             );
             newUser.setAuthorities(authorities);
             dataManager.save(newUser);
 
         }
     }
-
 
 
 }
